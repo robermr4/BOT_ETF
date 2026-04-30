@@ -18,6 +18,15 @@ def test_score_news_item_important():
     assert important > generic
 
 
+def test_classify_news_sentiment_labels():
+    positive, _ = bot.classify_news_sentiment("Nvidia rises after strong earnings beat", "Upbeat guidance lifts sentiment")
+    negative, _ = bot.classify_news_sentiment("Markets fall as recession fears grow", "Banking crisis worries return")
+    neutral, _ = bot.classify_news_sentiment("Stocks mixed ahead of Fed decision", "Investors wait for more detail")
+    assert "Positivo" in positive
+    assert "Negativo" in negative
+    assert "Neutro" in neutral
+
+
 def test_is_market_day_weekend():
     assert bot.is_market_day(date(2026, 4, 25)) is False
     assert bot.is_market_day(date(2026, 4, 26)) is False
@@ -48,6 +57,7 @@ def test_build_daily_message_open(monkeypatch: pytest.MonkeyPatch):
             "etf_ticker": "SPPW",
             "yahoo_symbol": "SPPW.DE",
             "news_limit": 6,
+            "section_news_limit": 2,
             "ai_summaries_enabled": False,
         },
     )
@@ -55,8 +65,13 @@ def test_build_daily_message_open(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bot, "get_yahoo_price", lambda symbol: {"symbol": symbol, "price": 39.42, "pct_change": 0.31, "currency": "EUR", "volume": 100, "average_volume": 100})
     monkeypatch.setattr(
         bot,
-        "fetch_news",
-        lambda: [{"title": "Fed calms markets", "summary": "Inflation cools", "source": "Reuters", "link": "https://example.com"}],
+        "fetch_news_sections",
+        lambda: {
+            "media": [{"title": "Fed calms markets", "summary": "Inflation cools", "source": "Reuters", "link": "https://example.com"}],
+            "forums": [],
+            "social": [],
+            "all": [{"title": "Fed calms markets", "summary": "Inflation cools", "source": "Reuters", "link": "https://example.com"}],
+        },
     )
 
     message = bot.build_daily_message("daily_open")
@@ -74,12 +89,13 @@ def test_build_daily_message_closed(monkeypatch: pytest.MonkeyPatch):
             "etf_ticker": "SPPW",
             "yahoo_symbol": "SPPW.DE",
             "news_limit": 6,
+            "section_news_limit": 2,
             "ai_summaries_enabled": False,
         },
     )
     monkeypatch.setattr(bot, "get_now_madrid", lambda: datetime(2026, 5, 1, 9, 5, tzinfo=ZoneInfo("Europe/Madrid")))
     monkeypatch.setattr(bot, "get_yahoo_price", lambda symbol: {"symbol": symbol, "price": None, "pct_change": None, "currency": "EUR", "volume": None, "average_volume": None})
-    monkeypatch.setattr(bot, "fetch_news", lambda: [])
+    monkeypatch.setattr(bot, "fetch_news_sections", lambda: {"media": [], "forums": [], "social": [], "all": []})
 
     message = bot.build_daily_message("daily_open")
     assert isinstance(message, str)

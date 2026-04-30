@@ -33,6 +33,23 @@ ETF_NEWS_QUERIES = [
     '"Wall Street" OR Nasdaq OR "S&P 500" OR "Europe stocks" OR "global stocks" OR "ETF flows" OR "fund flows" OR crash OR selloff OR rally',
 ]
 
+FORUM_REDDIT_SEARCHES = [
+    'SPPW OR "MSCI World" OR "SPDR MSCI World"',
+    "Fed OR inflation OR rates OR recession OR Nasdaq OR S&P 500",
+    "Nvidia OR Apple OR Microsoft OR Amazon OR Alphabet OR Meta",
+]
+
+SOCIAL_PULSE_QUERIES = [
+    '(site:x.com OR site:stocktwits.com OR site:bsky.app OR site:threads.net) (SPPW OR "MSCI World" OR "global stocks" OR Nasdaq OR "S&P 500")',
+    '(site:x.com OR site:stocktwits.com OR site:bsky.app) (Fed OR inflation OR rates OR recession OR "ETF flows" OR "fund flows" OR Nvidia OR Alphabet OR Amazon)',
+]
+
+NEWS_SECTION_TITLES = {
+    "media": "📰 Medios",
+    "forums": "💬 Foros y comunidad",
+    "social": "📱 Pulso social",
+}
+
 SOURCE_PRIORITY = {
     "reuters": 8,
     "bloomberg": 8,
@@ -57,6 +74,11 @@ SOURCE_PRIORITY = {
     "business insider": 4,
     "morningstar": 5,
     "fortune": 4,
+    "reddit": 4,
+    "stocktwits": 4,
+    "x": 3,
+    "threads": 3,
+    "bluesky": 3,
 }
 
 BLOCKED_SOURCES = {
@@ -65,6 +87,20 @@ BLOCKED_SOURCES = {
     "accesswire",
     "pr newswire",
 }
+
+RESTRICTED_SOURCE_HINTS = (
+    "bloomberg",
+    "wsj",
+    "wall street journal",
+    "financial times",
+    "ft.com",
+    "barrons",
+    "barron's",
+    "the economist",
+    "economist.com",
+    "seeking alpha",
+    "marketwatch",
+)
 
 TRANSLATION_PHRASES = [
     ("wall street cheers strong results from the chip giant", "Wall Street celebra los resultados sólidos del gigante de chips"),
@@ -418,6 +454,7 @@ _AI_TRANSLATOR = None
 _AI_TRANSLATOR_MODEL = None
 _AI_TRANSLATOR_FAILED = False
 _RESOLVED_LINK_CACHE: dict[str, str] = {}
+_NEWS_SUMMARY_CACHE: dict[str, str] = {}
 
 
 def load_config() -> dict[str, Any]:
@@ -439,6 +476,7 @@ def load_config() -> dict[str, Any]:
         "dry_run": os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "on"},
         "request_timeout": int(os.getenv("REQUEST_TIMEOUT", "8")),
         "news_limit": int(os.getenv("NEWS_LIMIT", "6")),
+        "section_news_limit": int(os.getenv("SECTION_NEWS_LIMIT", "5")),
         "ai_summaries_enabled": os.getenv("AI_SUMMARIES_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
         "ai_model_name": os.getenv("AI_MODEL_NAME", "google/flan-t5-base").strip(),
         "ai_translation_model_name": os.getenv("AI_TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-en-es").strip(),
@@ -552,11 +590,29 @@ def _parse_published(value: str | None) -> datetime | None:
         return None
 
 
-def _news_query_urls() -> list[str]:
+def _google_news_urls(queries: list[str]) -> list[str]:
     urls = []
-    for query in ETF_NEWS_QUERIES:
+    for query in queries:
         encoded = quote_plus(query)
         urls.append(f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en")
+    return urls
+
+
+def _news_query_urls() -> list[str]:
+    return _google_news_urls(ETF_NEWS_QUERIES)
+
+
+def _social_query_urls() -> list[str]:
+    return _google_news_urls(SOCIAL_PULSE_QUERIES)
+
+
+def _forum_query_urls() -> list[str]:
+    urls = [
+        "https://www.reddit.com/r/ETFs+investing+stocks+SecurityAnalysis/new/.rss?limit=20",
+    ]
+    for search in FORUM_REDDIT_SEARCHES:
+        encoded = quote_plus(search)
+        urls.append(f"https://www.reddit.com/search.rss?q={encoded}&sort=new&t=day")
     return urls
 
 
@@ -620,7 +676,7 @@ def get_yahoo_price(symbol: str) -> dict[str, Any]:
         }
 
 
-def fetch_rss_feed(url: str) -> list[dict[str, Any]]:
+def fetch_rss_feed(url: str, section: str = "media") -> list[dict[str, Any]]:
     config = load_config()
     try:
         response = requests.get(url, timeout=config["request_timeout"], headers={"User-Agent": USER_AGENT})
@@ -638,6 +694,10 @@ def fetch_rss_feed(url: str) -> list[dict[str, Any]]:
         source = ""
         if getattr(entry, "source", None):
             source = str(entry.source.get("title", "")).strip()
+        if not source and "reddit.com" in url:
+            source = "Reddit"
+        if not source and "stocktwits.com" in url:
+            source = "Stocktwits"
         items.append(
             {
                 "title": title,
@@ -645,6 +705,7 @@ def fetch_rss_feed(url: str) -> list[dict[str, Any]]:
                 "link": str(entry.get("link", "")).strip(),
                 "source": source,
                 "published": str(entry.get("published", "")).strip(),
+                "section": section,
             }
         )
     return items
@@ -653,11 +714,49 @@ def fetch_rss_feed(url: str) -> list[dict[str, Any]]:
 def fetch_news() -> list[dict[str, Any]]:
     news: list[dict[str, Any]] = []
     for url in _news_query_urls():
-        news.extend(fetch_rss_feed(url))
+        news.extend(fetch_rss_feed(url, section="media"))
     if not news:
         print("No se han podido obtener noticias relevantes.")
         return []
     return rank_news(news)
+
+
+def fetch_news_sections() -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "media": [],
+        "forums": [],
+        "social": [],
+    }
+
+    for url in _news_query_urls():
+        grouped["media"].extend(fetch_rss_feed(url, section="media"))
+    for url in _forum_query_urls():
+        grouped["forums"].extend(fetch_rss_feed(url, section="forums"))
+    for url in _social_query_urls():
+        grouped["social"].extend(fetch_rss_feed(url, section="social"))
+
+    ranked = {section: rank_news(items) for section, items in grouped.items()}
+    all_items: list[dict[str, Any]] = []
+    for items in ranked.values():
+        all_items.extend(items)
+    ranked["all"] = rank_news(all_items)
+    return ranked
+
+
+def _find_alternative_public_coverage(title: str, original_link: str | None = None) -> list[dict[str, Any]]:
+    query = quote_plus(f'"{_trim_text(_clean_news_text(title), 120)}"')
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    alternatives = fetch_rss_feed(url, section="media")
+    ranked = rank_news(alternatives)
+    filtered: list[dict[str, Any]] = []
+    for item in ranked:
+        link = item.get("link")
+        if original_link and link == original_link:
+            continue
+        filtered.append(item)
+        if len(filtered) >= 3:
+            break
+    return filtered
 
 
 def score_news_item(title: str, summary: str | None = None) -> int:
@@ -1323,6 +1422,21 @@ def resolve_news_link(url: str | None) -> str | None:
         return url
 
 
+def _source_or_link_looks_restricted(source: str | None = None, link: str | None = None) -> bool:
+    haystack = f"{source or ''} {link or ''}".lower()
+    return any(hint in haystack for hint in RESTRICTED_SOURCE_HINTS)
+
+
+def _article_text_is_weak(article_text: str, fallback_summary: str) -> bool:
+    cleaned_article = _clean_news_text(article_text)
+    cleaned_fallback = _clean_news_text(fallback_summary)
+    if len(cleaned_article.split()) < 45:
+        return True
+    if cleaned_fallback and difflib.SequenceMatcher(None, cleaned_article.lower(), cleaned_fallback.lower()).ratio() >= 0.88:
+        return True
+    return False
+
+
 def fetch_article_text(url: str | None, fallback_summary: str | None = None) -> str:
     fallback = _clean_news_text(fallback_summary)
     if not url:
@@ -1691,12 +1805,28 @@ def _build_ai_investor_facts(
             facts.append("Market tone is fairly calm.")
 
     main_labels: list[str] = []
-    for item in select_news_for_message(news_items, 3):
+    selected_news = select_news_for_message(news_items, 3)
+    sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
+    for index, item in enumerate(selected_news, start=1):
         label = _build_news_label(item.get("title", ""), item.get("summary"))
         if label not in main_labels:
             main_labels.append(label)
+        translated_summary = item.get("translated_summary") or build_rule_based_news_summary(item.get("title", ""), item.get("summary"))
+        sentiment_label, sentiment_key = classify_news_sentiment(item.get("title", ""), item.get("summary"), translated_summary)
+        sentiment_counts[sentiment_key] = sentiment_counts.get(sentiment_key, 0) + 1
+        facts.append(f"Headline {index}: {_clean_news_text(item.get('title', ''))}.")
+        facts.append(f"Headline {index} theme: {label}.")
+        facts.append(f"Headline {index} tone: {sentiment_key}.")
+        facts.append(f"Headline {index} detail: {_clean_news_text(item.get('summary') or translated_summary)}")
     if main_labels:
         facts.append(f"Main news themes: {', '.join(main_labels)}.")
+    if any(sentiment_counts.values()):
+        facts.append(
+            "News tone mix: "
+            f"{sentiment_counts['positive']} positive, "
+            f"{sentiment_counts['negative']} negative, "
+            f"{sentiment_counts['neutral']} neutral."
+        )
 
     headline_blob = " ".join((item.get("title", "") + " " + item.get("summary", "")) for item in news_items[:4]).lower()
     if any(keyword in headline_blob for keyword in CRISIS_KEYWORDS):
@@ -1730,52 +1860,84 @@ def _generate_ai_investor_message(
     facts = _build_ai_investor_facts(mode, market_status, price_data, news_items, money_flow_analysis)
     facts_block = "\n".join(f"- {fact}" for fact in facts)
     if kind == "advice":
-        prompt = (
-            "Write one short sentence in plain English for a cautious long-term investor. "
-            "It must sound practical, calm, and grounded. "
-            "Mention staying with the plan. "
-            "If volatility is high, mention splitting extra cash into 2 or 3 parts. "
-            "Never say buy now, sell now, guaranteed, or certain.\n\n"
-            f"Facts:\n{facts_block}"
+        style_hint = random.choice(
+            [
+                "Keep it grounded and practical.",
+                "Sound calm, direct, and human.",
+                "Make it useful for a steady monthly investor.",
+            ]
         )
-        max_tokens = 64
+        prompt = (
+            "Write exactly 2 short sentences in plain English for a cautious long-term investor. "
+            "Sentence 1 must mention the main driver from the facts in simple words. "
+            "Sentence 2 must say what to do with a cool head: stay with the plan, avoid emotional moves, and if volatility is high split extra cash into 2 or 3 parts. "
+            "Never say buy now, sell now, guaranteed, or certain.\n\n"
+            f"{style_hint}\n\nFacts:\n{facts_block}"
+        )
+        max_tokens = 96
     else:
+        style_hint = random.choice(
+            [
+                "Make it sound like a smart, calm Spanish briefing.",
+                "Keep it practical and down to earth.",
+                "Avoid cliches and say what matters plainly.",
+            ]
+        )
         prompt = (
             "Write exactly 3 short sentences in plain English for a cautious long-term investor. "
-            "Sentence 1 must describe today's situation in simple words and mention the main driver. "
+            "Sentence 1 must describe today's situation in simple words and mention the main driver from the facts. "
             "Sentence 2 must explain what really matters for a calm long-term investor in this context. "
             "Sentence 3 must say what is sensible for someone investing 100 euros per month: stay with the plan, do not chase euphoria, do not sell from fear, and if volatility is high mention splitting extra cash into 2 or 3 parts. "
-            "Sound practical, grounded, and human. Never say buy now, sell now, guaranteed, or certain.\n\n"
-            f"Facts:\n{facts_block}"
+            "Do not use generic filler. Sound practical, grounded, and human. Never say buy now, sell now, guaranteed, or certain.\n\n"
+            f"{style_hint}\n\nFacts:\n{facts_block}"
         )
-        max_tokens = 120
+        max_tokens = 132
+
+    attempts = (
+        {
+            "do_sample": True,
+            "temperature": 0.72,
+            "top_p": 0.92,
+            "repetition_penalty": 1.08,
+            "no_repeat_ngram_size": 3,
+        },
+        {
+            "do_sample": False,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "repetition_penalty": 1.05,
+            "no_repeat_ngram_size": 3,
+        },
+    )
 
     try:
-        english_text = _run_ai_summarizer(
-            prompt,
-            summarizer,
-            max_new_tokens=max_tokens,
-            do_sample=False,
-            temperature=1.0,
-            top_p=1.0,
-            repetition_penalty=1.05,
-            no_repeat_ngram_size=3,
-        )
-        english_text = _sanitize_generated_news_summary(english_text)
-        if len(english_text.split()) < 8 or "facts:" in english_text.lower():
-            return None
+        for attempt in attempts:
+            english_text = _run_ai_summarizer(
+                prompt,
+                summarizer,
+                max_new_tokens=max_tokens,
+                do_sample=attempt["do_sample"],
+                temperature=attempt["temperature"],
+                top_p=attempt["top_p"],
+                repetition_penalty=attempt["repetition_penalty"],
+                no_repeat_ngram_size=attempt["no_repeat_ngram_size"],
+            )
+            english_text = _sanitize_generated_news_summary(english_text)
+            if len(english_text.split()) < 8 or "facts:" in english_text.lower():
+                continue
 
-        spanish_text = _translate_passage_with_ai(english_text, translator)
-        spanish_text = _sanitize_spanish_investor_text(spanish_text)
-        if kind == "conclusion":
-            if "100" not in spanish_text:
-                return None
-            if not spanish_text.lower().startswith("resumen en cristiano:"):
-                spanish_text = f"Resumen en cristiano: {spanish_text}"
-        if _looks_like_bad_investor_text(spanish_text):
-            return None
-        print(f"Texto IA gratis OK para {kind}: {spanish_text[:90]}")
-        return _trim_text(spanish_text, 360 if kind == "conclusion" else 220)
+            spanish_text = _translate_passage_with_ai(english_text, translator)
+            spanish_text = _sanitize_spanish_investor_text(spanish_text)
+            if kind == "conclusion":
+                if "100" not in spanish_text:
+                    continue
+                if not spanish_text.lower().startswith("resumen en cristiano:"):
+                    spanish_text = f"Resumen en cristiano: {spanish_text}"
+            if _looks_like_bad_investor_text(spanish_text):
+                continue
+            print(f"Texto IA gratis OK para {kind}: {spanish_text[:90]}")
+            return _trim_text(spanish_text, 360 if kind == "conclusion" else 220)
+        return None
     except Exception as exc:  # noqa: BLE001
         print(f"No he podido generar {kind} con IA gratis: {exc}")
         return None
@@ -1827,6 +1989,27 @@ def _build_news_label(title: str, summary: str | None = None) -> str:
     if any(keyword in text for keyword in ("nasdaq", "s&p 500", "wall street", "global stocks", "europe stocks")):
         return "Tono de Wall Street"
     return "Contexto global"
+
+
+def classify_news_sentiment(title: str, summary: str | None = None, translated_summary: str | None = None) -> tuple[str, str]:
+    text = " ".join(filter(None, [title, summary, translated_summary])).lower()
+    positive = sum(1 for keyword in POSITIVE_NEWS_KEYWORDS if keyword in text)
+    negative = sum(1 for keyword in NEGATIVE_NEWS_KEYWORDS if keyword in text)
+
+    if any(keyword in text for keyword in ("beats", "beat", "upbeat guidance", "jumps", "rally", "surges", "strong earnings")):
+        positive += 2
+    if any(keyword in text for keyword in ("warning", "selloff", "falls", "drop", "recession", "banking crisis", "war", "tariffs")):
+        negative += 2
+    if any(keyword in text for keyword in ("cuts interest rates", "rate cut", "inflation cools", "soft landing")):
+        positive += 1
+    if any(keyword in text for keyword in ("inflation remains sticky", "rates stay high", "pressure margins", "guidance cut")):
+        negative += 1
+
+    if positive >= negative + 2:
+        return ("🟢 Positivo", "positive")
+    if negative >= positive + 2:
+        return ("🔴 Negativo", "negative")
+    return ("🟡 Neutro", "neutral")
 
 
 def build_rule_based_news_summary(title: str, summary: str | None = None) -> str:
@@ -1945,16 +2128,67 @@ def _generate_ai_news_summary(
     return _sanitize_generated_news_summary(generated)
 
 
-def build_spanish_news_summary(title: str, summary: str | None = None, link: str | None = None) -> str:
+def build_spanish_news_summary(
+    title: str,
+    summary: str | None = None,
+    link: str | None = None,
+    source: str | None = None,
+) -> str:
     config = load_config()
     if not config.get("ai_summaries_enabled", True):
         return build_rule_based_news_summary(title, summary)
 
-    article_text = fetch_article_text(link, fallback_summary=f"{title}. {summary or ''}")
+    cache_key = "||".join(
+        [
+            _clean_news_text(title),
+            _clean_news_text(summary),
+            str(link or ""),
+            str(source or ""),
+        ]
+    )
+    cached_summary = _NEWS_SUMMARY_CACHE.get(cache_key)
+    if cached_summary:
+        return cached_summary
+
+    fallback_seed = f"{title}. {summary or ''}"
+    article_text = fetch_article_text(link, fallback_summary=fallback_seed)
     cleaned_article = _clean_news_text(article_text)
-    passages = _extract_supporting_passages(title, summary, cleaned_article, max_sentences=3)
+    passages: list[str] = []
+
+    try_alternative_first = _source_or_link_looks_restricted(source, link) or _article_text_is_weak(cleaned_article, fallback_seed)
+    if not try_alternative_first:
+        passages = _extract_supporting_passages(title, summary, cleaned_article, max_sentences=3)
+
+    if try_alternative_first or not passages:
+        for alternative in _find_alternative_public_coverage(title, link):
+            alt_fallback = f"{alternative.get('title', '')}. {alternative.get('summary', '')}"
+            alt_text = fetch_article_text(alternative.get("link"), fallback_summary=alt_fallback)
+            alt_cleaned = _clean_news_text(alt_text)
+            if _article_text_is_weak(alt_cleaned, alt_fallback):
+                continue
+            alt_passages = _extract_supporting_passages(
+                alternative.get("title", title),
+                alternative.get("summary", summary),
+                alt_cleaned,
+                max_sentences=3,
+            )
+            if alt_passages:
+                print(f"Cobertura alternativa encontrada para: {title[:70]}")
+                title = alternative.get("title", title)
+                summary = alternative.get("summary", summary)
+                link = alternative.get("link", link)
+                source = alternative.get("source", source)
+                cleaned_article = alt_cleaned
+                passages = alt_passages
+                break
+
     if not passages:
-        return build_rule_based_news_summary(title, summary)
+        passages = _extract_supporting_passages(title, summary, cleaned_article, max_sentences=3)
+
+    if not passages:
+        final_text = build_rule_based_news_summary(title, summary)
+        _NEWS_SUMMARY_CACHE[cache_key] = final_text
+        return final_text
 
     translator = _get_ai_translator(config)
     passage_summary = _build_passage_translation_summary(
@@ -1966,11 +2200,14 @@ def build_spanish_news_summary(title: str, summary: str | None = None, link: str
     )
     if passage_summary and "headline:" not in passage_summary.lower() and "key passages:" not in passage_summary.lower():
         print(f"Resumen IA por pasajes para: {title[:70]}")
+        _NEWS_SUMMARY_CACHE[cache_key] = passage_summary
         return passage_summary
 
     summarizer = _get_ai_summarizer(config)
     if summarizer is None:
-        return build_rule_based_news_summary(title, summary)
+        final_text = build_rule_based_news_summary(title, summary)
+        _NEWS_SUMMARY_CACHE[cache_key] = final_text
+        return final_text
 
     candidate_text = " ".join(passages)
 
@@ -2005,18 +2242,50 @@ def build_spanish_news_summary(title: str, summary: str | None = None, link: str
         text = _sanitize_generated_news_summary(generated)
         if not _is_vague_generated_summary(text, title, summary):
             print(f"Resumen IA OK para: {title[:70]}")
-            return _trim_text(text, config.get("ai_summary_max_chars", 360))
+            final_text = _trim_text(text, config.get("ai_summary_max_chars", 360))
+            _NEWS_SUMMARY_CACHE[cache_key] = final_text
+            return final_text
 
         translated_passages = _generate_ai_news_summary(summarizer, title, summary, passages, mode="translate")
         if not _is_vague_generated_summary(translated_passages, title, summary):
             print(f"Resumen IA OK (modo pasajes) para: {title[:70]}")
-            return _trim_text(translated_passages, config.get("ai_summary_max_chars", 360))
+            final_text = _trim_text(translated_passages, config.get("ai_summary_max_chars", 360))
+            _NEWS_SUMMARY_CACHE[cache_key] = final_text
+            return final_text
 
         print(f"Resumen IA demasiado vago para '{title[:70]}'. Uso resumen de respaldo.")
-        return build_rule_based_news_summary(title, summary)
+        final_text = build_rule_based_news_summary(title, summary)
+        _NEWS_SUMMARY_CACHE[cache_key] = final_text
+        return final_text
     except Exception as exc:  # noqa: BLE001
         print(f"El resumen IA falló para '{title}': {exc}")
         return build_rule_based_news_summary(title, summary)
+
+
+def _render_news_item(index: int, item: dict[str, Any], summary_max_len: int = 185) -> str:
+    label = escape(_trim_text(_build_news_label(item.get("title", ""), item.get("summary")), 62))
+    summary_text = item.get("translated_summary") or build_spanish_news_summary(
+        item.get("title", ""),
+        item.get("summary"),
+        item.get("link"),
+        item.get("source"),
+    )
+    item["translated_summary"] = summary_text
+    sentiment_label, _ = classify_news_sentiment(item.get("title", ""), item.get("summary"), summary_text)
+    summary_es = escape(_trim_text(summary_text, summary_max_len))
+    source = escape(item.get("source") or "Fuente no indicada")
+    link = item.get("link") or ""
+    if link:
+        return (
+            f"{index}. <b>{label}</b> {escape(sentiment_label)}\n"
+            f"{summary_es}\n"
+            f'🔗 {source} | <a href="{escape(link, quote=True)}">Abrir</a>'
+        )
+    return (
+        f"{index}. <b>{label}</b> {escape(sentiment_label)}\n"
+        f"{summary_es}\n"
+        f"🔗 {source}"
+    )
 
 
 def _news_lines(news_items: list[dict[str, Any]], limit: int) -> list[str]:
@@ -2026,29 +2295,53 @@ def _news_lines(news_items: list[dict[str, Any]], limit: int) -> list[str]:
     lines: list[str] = []
     selected_items = select_news_for_message(news_items, limit)
     for index, item in enumerate(selected_items, start=1):
-        label = escape(_trim_text(_build_news_label(item.get("title", ""), item.get("summary")), 60))
-        summary_es = escape(
-            _trim_text(
-                build_spanish_news_summary(
-                    item.get("title", ""),
-                    item.get("summary"),
-                    item.get("link"),
-                ),
-                320,
+        lines.append(_render_news_item(index, item))
+    return lines
+
+
+def _news_item_key(item: dict[str, Any]) -> str:
+    return (item.get("link") or _clean_news_text(item.get("title", "")) or repr(item)).strip()
+
+
+def _prepare_news_sections_for_message(
+    news_sections: dict[str, list[dict[str, Any]]],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    prepared: dict[str, list[dict[str, Any]]] = {"media": [], "forums": [], "social": [], "all": []}
+    merged: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for section_key in ("media", "forums", "social"):
+        selected_items = select_news_for_message(news_sections.get(section_key, []), limit)
+        for original_item in selected_items:
+            item = dict(original_item)
+            item["translated_summary"] = build_spanish_news_summary(
+                item.get("title", ""),
+                item.get("summary"),
+                item.get("link"),
+                item.get("source"),
             )
-        )
-        source = escape(item.get("source") or "Fuente no indicada")
-        link = item.get("link") or ""
-        if link:
-            lines.append(
-                f"{index}. <b>{label}:</b> {summary_es}\n"
-                f'Fuente: {source} | <a href="{escape(link, quote=True)}">Abrir noticia</a>'
-            )
-        else:
-            lines.append(
-                f"{index}. <b>{label}:</b> {summary_es}\n"
-                f"Fuente: {source}"
-            )
+            prepared[section_key].append(item)
+
+            item_key = _news_item_key(item)
+            if item_key not in seen_keys:
+                merged.append(item)
+                seen_keys.add(item_key)
+
+    prepared["all"] = select_news_for_message(merged, max(6, min(len(merged), limit * 2)))
+    return prepared
+
+
+def _news_section_lines(news_sections: dict[str, list[dict[str, Any]]], limit: int) -> list[str]:
+    lines: list[str] = []
+    for section_key in ("media", "forums", "social"):
+        lines.extend(["", f"<b>{NEWS_SECTION_TITLES[section_key]}</b>"])
+        section_items = news_sections.get(section_key, [])
+        if not section_items:
+            lines.append("No he visto señales claras en esta categoría ahora mismo.")
+            continue
+        for index, item in enumerate(section_items[:limit], start=1):
+            lines.append(_render_news_item(index, item))
     return lines
 
 
@@ -2074,7 +2367,9 @@ def build_daily_message(mode: str) -> str:
     market_open = is_market_day(today)
     closed_reason = get_market_closed_reason(today)
     price_data = get_yahoo_price(config["yahoo_symbol"])
-    news_items = fetch_news()
+    raw_news_sections = fetch_news_sections()
+    news_sections = _prepare_news_sections_for_message(raw_news_sections, config["section_news_limit"])
+    news_items = news_sections.get("all", [])
     money_flow_analysis = build_money_flow_analysis(price_data, news_items)
     prudent_advice = build_prudent_advice(mode, price_data, news_items, market_open)
     conclusion = build_plain_spanish_conclusion(
@@ -2095,52 +2390,52 @@ def build_daily_message(mode: str) -> str:
     lines = [
         f"<b>{title}</b>",
         "",
-        f"<b>ETF:</b> {escape(config['etf_name'])} ({escape(config['etf_ticker'])})",
-        f"<b>Estado:</b> {status_text}",
-        f"<b>Hora:</b> {now.strftime('%d/%m/%Y %H:%M')} España",
+        f"💼 <b>ETF:</b> {escape(config['etf_name'])} ({escape(config['etf_ticker'])})",
+        f"📍 <b>Estado:</b> {status_text}",
+        f"🕒 <b>Hora:</b> {now.strftime('%d/%m/%Y %H:%M')} España",
     ]
 
     if not market_open:
         reason = escape(closed_reason or "sin negociación")
-        lines.append(f"<b>Motivo:</b> {reason}. Hoy no hay negociación normal en Xetra.")
+        lines.append(f"⛔ <b>Motivo:</b> {reason}. Hoy no hay negociación normal en Xetra.")
 
-    lines.extend(["", "<b>Precio aproximado:</b>"])
+    lines.extend(["", "💶 <b>Precio aproximado:</b>"])
     if price is None:
         lines.append("Precio no disponible ahora mismo.")
     else:
         lines.append(f"{escape(config['yahoo_symbol'])}: {_format_decimal(price)} {currency} ({_format_percent(pct_change)})")
 
     if mode == "daily_close":
-        lines.extend(["", "<b>Resumen del día:</b>", escape(_build_close_tone(price_data, news_items, market_open))])
+        lines.extend(["", "🌆 <b>Resumen del día:</b>", escape(_build_close_tone(price_data, news_items, market_open))])
 
-    lines.extend(["", "<b>Noticias importantes:</b>"])
-    lines.extend(_news_lines(news_items, config["news_limit"]))
+    lines.extend(["", "🧠 <b>Mapa de noticias y conversación:</b>"])
+    lines.extend(_news_section_lines(news_sections, config["section_news_limit"]))
 
     lines.extend(
         [
             "",
-            "<b>Radar de la pasta:</b>",
-            f"- <b>Dinero grande:</b> {escape(money_flow_analysis['big_money'])}",
-            f"- <b>Dinero medio:</b> {escape(money_flow_analysis['medium_money'])}",
-            f"- <b>Dinero pequeño:</b> {escape(money_flow_analysis['small_money'])}",
-            f"- <b>Nota:</b> {escape(money_flow_analysis['note'])}",
+            "💸 <b>Radar de la pasta:</b>",
+            f"- 🏦 <b>Dinero grande:</b> {escape(money_flow_analysis['big_money'])}",
+            f"- 👥 <b>Dinero medio:</b> {escape(money_flow_analysis['medium_money'])}",
+            f"- 🙋 <b>Dinero pequeño:</b> {escape(money_flow_analysis['small_money'])}",
+            f"- ℹ️ <b>Nota:</b> {escape(money_flow_analysis['note'])}",
         ]
     )
 
     if warnings:
-        lines.extend(["", "<b>Avisos de calendario:</b>"])
+        lines.extend(["", "📅 <b>Avisos de calendario:</b>"])
         lines.extend(f"- {escape(warning)}" for warning in warnings)
 
     lines.extend(
         [
             "",
-            "<b>Qué hacer con cabeza:</b>",
+            "🧭 <b>Qué hacer con cabeza:</b>",
             escape(prudent_advice),
             "",
-            "<b>Conclusión bajada a tierra:</b>",
+            "🧱 <b>Conclusión bajada a tierra:</b>",
             escape(conclusion),
             "",
-            "<b>Aviso:</b> Esto no es asesoramiento financiero personalizado.",
+            "⚠️ <b>Aviso:</b> Esto no es asesoramiento financiero personalizado.",
         ]
     )
     return "\n".join(lines)

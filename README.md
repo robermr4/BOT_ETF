@@ -7,8 +7,10 @@ Bot gratuito de Telegram para seguir tu `SPDR MSCI World UCITS ETF` (`SPPW`, sí
 - Envía un mensaje diario de apertura pensado para las `09:05` hora de España.
 - Envía un mensaje diario de cierre pensado para las `17:40` hora de España.
 - También manda mensaje en sábados, domingos y festivos, pero adaptado a que el mercado está cerrado.
-- Usa fuentes gratuitas: Google News RSS y Yahoo Finance público.
-- Resume noticias relevantes, si el mercado está abierto o cerrado, el precio aproximado si está disponible y una lectura prudente de lo que parece estar haciendo “la pasta”.
+- Usa fuentes gratuitas: Google News RSS, Reddit RSS, cobertura pública indexada y Yahoo Finance público.
+- Separa el bloque de información en medios, foros/comunidad y pulso social.
+- Resume noticias relevantes en español, marca cada una como positiva, negativa o neutra, y añade una lectura prudente de lo que parece estar haciendo “la pasta”.
+- Usa IA gratuita/local tanto para los resúmenes como para “qué hacer con cabeza” y la conclusión final, con respaldo por reglas si esa ruta falla.
 - Tiene un segundo modo de vigilancia para alertas fuertes durante el día.
 - Puede funcionar aunque tu ordenador esté apagado si lo subes a GitHub y usas los workflows de GitHub Actions incluidos.
 
@@ -55,6 +57,10 @@ Variables normales que puedes cambiar en el workflow o en `.env`:
 - `YAHOO_SYMBOL`
 - `TIMEZONE`
 - `RUN_MODE`
+- `SECTION_NEWS_LIMIT`
+- `AI_SUMMARIES_ENABLED`
+- `AI_MODEL_NAME`
+- `AI_TRANSLATION_MODEL`
 
 ## Instalación local
 
@@ -135,6 +141,8 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Estado del mercado Xetra.
 - Precio aproximado del ETF si Yahoo Finance responde.
 - Noticias de ETF, MSCI World, grandes tecnológicas, macro y mercado.
+- Un bloque separado de medios, otro de foros/comunidad y otro de pulso social.
+- Sentimiento aproximado por noticia: positivo, negativo o neutro.
 - Señales aproximadas sobre:
   - dinero grande / institucional
   - dinero medio
@@ -143,8 +151,10 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 ## Fuentes y limitaciones
 
 - Google News RSS puede cambiar, fallar o devolver resultados raros.
+- La parte de “pulso social” no usa la API oficial de X porque no es gratuita de forma estable; usa resultados públicos indexados, Reddit y otras fuentes abiertas, así que puede ser irregular.
 - Yahoo Finance gratuito puede fallar o no devolver precio temporalmente.
 - Si una fuente falla, el bot intenta seguir con las demás.
+- Si una noticia está detrás de un muro de pago y no se puede extraer bien, el bot intenta buscar cobertura pública alternativa del mismo tema.
 - El análisis de “ricos/medios/pequeños” es una heurística, no un dato exacto por tipo de inversor.
 - La deduplicación de alertas graves es básica. En local guarda un pequeño estado en `.runtime/last_alert.json`, pero en GitHub Actions puede repetirse alguna alerta porque el runner es efímero.
 
@@ -166,8 +176,9 @@ Para 2026 se han tomado como referencia los días no negociables publicados por 
 
 - ETF y ticker: cambia `ETF_NAME`, `ETF_TICKER` y `YAHOO_SYMBOL`.
 - Horarios: ajusta `DAILY_TARGETS` y los cron de GitHub Actions.
+- Número de piezas por sección: cambia `SECTION_NEWS_LIMIT`.
 - Palabras clave: edita `ETF_NEWS_QUERIES`, `VERY_IMPORTANT_KEYWORDS`, `IMPORTANT_KEYWORDS` y `CRISIS_KEYWORDS`.
-- Fuentes RSS: modifica `_news_query_urls()`.
+- Fuentes RSS: modifica `_news_query_urls()`, `_forum_query_urls()` y `_social_query_urls()`.
 - Festivos: actualiza `XETRA_HOLIDAYS_2026`.
 - Umbrales de catástrofe: ajusta `detect_catastrophe()`.
 
