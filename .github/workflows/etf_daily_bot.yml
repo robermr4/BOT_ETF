@@ -1,0 +1,60 @@
+name: ETF Daily Bot
+
+on:
+  schedule:
+    - cron: "5 7 * * *"
+    - cron: "5 8 * * *"
+    - cron: "40 15 * * *"
+    - cron: "40 16 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecución"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - daily_open
+          - daily_close
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-flan-t5-base-opus-en-es-v2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ETF_NAME: SPDR MSCI World UCITS ETF
+          ETF_TICKER: SPPW
+          YAHOO_SYMBOL: SPPW.DE
+          TIMEZONE: Europe/Madrid
+          RUN_MODE: ${{ github.event.inputs.mode || 'auto' }}
+          AI_SUMMARIES_ENABLED: "1"
+          AI_MODEL_NAME: google/flan-t5-base
+          AI_TRANSLATION_MODEL: Helsinki-NLP/opus-mt-en-es
+          HF_HOME: ./.hf-cache
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PYTHONUNBUFFERED: "1"
+        run: python bot.py

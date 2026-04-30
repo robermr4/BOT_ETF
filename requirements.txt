@@ -1,0 +1,8 @@
+requests
+feedparser
+pytest
+python-dotenv
+trafilatura
+transformers
+torch
+sentencepiece
