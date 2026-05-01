@@ -354,6 +354,39 @@ NEGATIVE_NEWS_KEYWORDS = (
     "war",
 )
 
+NEWS_DEDUP_STOPWORDS = {
+    "about",
+    "after",
+    "ahead",
+    "amid",
+    "and",
+    "are",
+    "as",
+    "before",
+    "from",
+    "have",
+    "into",
+    "its",
+    "market",
+    "markets",
+    "more",
+    "news",
+    "over",
+    "says",
+    "share",
+    "shares",
+    "stock",
+    "stocks",
+    "the",
+    "their",
+    "this",
+    "with",
+    "por",
+    "para",
+    "sobre",
+    "tras",
+}
+
 COMPANY_LABELS = {
     "nvidia": "Nvidia",
     "apple": "Apple",
@@ -788,10 +821,53 @@ def _normalize_title(title: str) -> str:
     return normalized
 
 
+def _canonical_news_tokens(title: str, summary: str | None = None) -> set[str]:
+    text = _normalize_title(f"{title} {summary or ''}")
+    return {
+        token
+        for token in text.split()
+        if len(token) >= 4 and token not in NEWS_DEDUP_STOPWORDS
+    }
+
+
+def _keyword_hits(text: str, keywords: tuple[str, ...] | dict[str, int]) -> list[str]:
+    lowered = text.lower()
+    return [keyword.replace(" ", "_") for keyword in keywords if keyword in lowered]
+
+
+def _news_event_terms(title: str, summary: str | None = None) -> list[str]:
+    text = f"{title} {summary or ''}".lower()
+    terms: list[str] = []
+    terms.extend(label.lower() for label in _extract_company_names(text))
+    terms.extend(_topic_keys_for_news(title, summary))
+    crisis_hits = _keyword_hits(text, CRISIS_KEYWORDS)
+    terms.extend(crisis_hits)
+    if not crisis_hits:
+        terms.extend(_keyword_hits(text, POSITIVE_NEWS_KEYWORDS))
+        terms.extend(_keyword_hits(text, NEGATIVE_NEWS_KEYWORDS))
+
+    deduped: list[str] = []
+    for term in terms:
+        normalized = re.sub(r"[^a-z0-9_]+", "_", term.lower()).strip("_")
+        if normalized and normalized not in {"general", "mercado"} and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def _news_event_signature(item: dict[str, Any]) -> str:
+    title = item.get("title", "")
+    summary = item.get("summary")
+    event_terms = _news_event_terms(title, summary)
+    if event_terms:
+        return "|".join(event_terms[:8])
+    return "|".join(sorted(_canonical_news_tokens(title, summary))[:8])
+
+
 def deduplicate_news(news_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
     seen_signatures: set[str] = set()
+    seen_events: dict[str, list[set[str]]] = {}
     buckets: dict[str, list[set[str]]] = {}
 
     for item in news_items:
@@ -810,6 +886,17 @@ def deduplicate_news(news_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if signature and signature in seen_signatures:
             continue
 
+        event_signature = _news_event_signature(item)
+        if event_signature:
+            event_is_duplicate = False
+            for previous_tokens in seen_events.get(event_signature, []):
+                overlap = len(tokens & previous_tokens) / max(len(tokens | previous_tokens), 1)
+                if overlap >= 0.42:
+                    event_is_duplicate = True
+                    break
+            if event_is_duplicate:
+                continue
+
         bucket_key = next(iter(sorted(tokens)), current[:24])
         is_duplicate = False
         for previous_tokens in buckets.get(bucket_key, []):
@@ -826,6 +913,8 @@ def deduplicate_news(news_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen_titles.add(current)
         if signature:
             seen_signatures.add(signature)
+        if event_signature:
+            seen_events.setdefault(event_signature, []).append(tokens)
         buckets.setdefault(bucket_key, []).append(tokens)
         unique.append(item)
 
@@ -947,19 +1036,25 @@ def select_news_for_message(news_items: list[dict[str, Any]], limit: int) -> lis
     selected: list[dict[str, Any]] = []
     primary_topic_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
 
     for item in news_items:
         topics = _topic_keys_for_news(item.get("title", ""), item.get("summary"))
         primary = topics[0]
         source = (item.get("source") or "").lower()
+        event_signature = _news_event_signature(item)
 
         if primary_topic_counts.get(primary, 0) >= 1:
             continue
         if source and source_counts.get(source, 0) >= 2:
             continue
+        if event_signature and event_counts.get(event_signature, 0) >= 1:
+            continue
 
         selected.append(item)
         primary_topic_counts[primary] = primary_topic_counts.get(primary, 0) + 1
+        if event_signature:
+            event_counts[event_signature] = event_counts.get(event_signature, 0) + 1
         if source:
             source_counts[source] = source_counts.get(source, 0) + 1
         if len(selected) >= limit:
@@ -971,14 +1066,19 @@ def select_news_for_message(news_items: list[dict[str, Any]], limit: int) -> lis
         topics = _topic_keys_for_news(item.get("title", ""), item.get("summary"))
         primary = topics[0]
         source = (item.get("source") or "").lower()
+        event_signature = _news_event_signature(item)
 
         if primary_topic_counts.get(primary, 0) >= 2:
             continue
         if source and source_counts.get(source, 0) >= 2:
             continue
+        if event_signature and event_counts.get(event_signature, 0) >= 1:
+            continue
 
         selected.append(item)
         primary_topic_counts[primary] = primary_topic_counts.get(primary, 0) + 1
+        if event_signature:
+            event_counts[event_signature] = event_counts.get(event_signature, 0) + 1
         if source:
             source_counts[source] = source_counts.get(source, 0) + 1
         if len(selected) >= limit:
@@ -2447,6 +2547,40 @@ def _extract_change(price_data: dict[str, Any]) -> float | None:
     return None
 
 
+def _price_alert_severity(pct_change: float | None) -> str:
+    if pct_change is None:
+        return "unknown"
+    if pct_change <= -7.0:
+        return "panic"
+    if pct_change <= -5.0:
+        return "major"
+    return "sharp"
+
+
+def _price_alert_event_key(symbol: str, pct_change: float | None) -> str:
+    return f"price_drop:{symbol}:{_price_alert_severity(pct_change)}"
+
+
+def _alert_event_key(headline: str, alerts: list[str], triggered_news: dict[str, Any] | None) -> str:
+    if triggered_news:
+        signature = _news_event_signature(triggered_news)
+        if signature:
+            return f"news:{signature}"
+    if alerts:
+        first_alert = alerts[0]
+        match = re.match(r"(.+?)\s+cae\s+(-?\d+(?:[,.]\d+)?)%", first_alert)
+        if match:
+            symbol = match.group(1).strip()
+            try:
+                pct_change = float(match.group(2).replace(",", "."))
+            except ValueError:
+                pct_change = None
+            return _price_alert_event_key(symbol, pct_change)
+    fallback = _normalize_title(" ".join([headline, *alerts]))
+    tokens = sorted(token for token in fallback.split() if token not in NEWS_DEDUP_STOPWORDS)
+    return "alert:" + "|".join(tokens[:10])
+
+
 def detect_catastrophe(price_data: dict[str, Any], news_items: list[dict[str, Any]]) -> dict[str, Any]:
     main_price = price_data.get("main", price_data)
     watchlist = price_data.get("watchlist", {})
@@ -2481,7 +2615,8 @@ def detect_catastrophe(price_data: dict[str, Any], news_items: list[dict[str, An
     if triggered_news:
         headline = triggered_news.get("title", headline)
 
-    alert_hash = hashlib.sha256(headline.encode("utf-8")).hexdigest()[:16] if headline else ""
+    event_key = _alert_event_key(headline, alerts, triggered_news) if alerts else ""
+    alert_hash = hashlib.sha256(event_key.encode("utf-8")).hexdigest()[:16] if event_key else ""
     return {
         "triggered": bool(alerts),
         "headline": headline,
@@ -2489,6 +2624,7 @@ def detect_catastrophe(price_data: dict[str, Any], news_items: list[dict[str, An
         "top_news": triggered_news,
         "main_price": main_price,
         "watchlist": watchlist,
+        "event_key": event_key,
         "hash": alert_hash,
     }
 
@@ -2545,32 +2681,83 @@ def _alert_state_path() -> Path:
 def _load_alert_state() -> dict[str, Any]:
     path = _alert_state_path()
     if not path.exists():
-        return {}
+        return {"recent_alerts": []}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {}
+        return {"recent_alerts": []}
+    if "recent_alerts" not in state:
+        legacy_hash = state.get("hash")
+        legacy_sent_at = state.get("sent_at")
+        if legacy_hash and legacy_sent_at:
+            state["recent_alerts"] = [{"hash": legacy_hash, "event_key": "", "sent_at": legacy_sent_at, "headline": ""}]
+        else:
+            state["recent_alerts"] = []
+    return state
 
 
-def _save_alert_state(alert_hash: str, sent_at: datetime) -> None:
-    payload = {"hash": alert_hash, "sent_at": sent_at.isoformat()}
+def _save_alert_state(alert_data: dict[str, Any] | str, sent_at: datetime) -> None:
+    if isinstance(alert_data, str):
+        alert_hash = alert_data
+        event_key = ""
+        headline = ""
+    else:
+        alert_hash = alert_data.get("hash", "")
+        event_key = alert_data.get("event_key", "")
+        headline = alert_data.get("headline", "")
+
+    state = _load_alert_state()
+    recent_alerts = [
+        item
+        for item in state.get("recent_alerts", [])
+        if _alert_state_item_is_recent(item, sent_at, hours=48)
+    ]
+    recent_alerts.append(
+        {
+            "hash": alert_hash,
+            "event_key": event_key,
+            "headline": headline,
+            "sent_at": sent_at.isoformat(),
+        }
+    )
+    payload = {"recent_alerts": recent_alerts[-30:]}
     _alert_state_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _is_duplicate_alert(alert_hash: str) -> bool:
-    if not alert_hash:
-        return False
-    state = _load_alert_state()
-    if state.get("hash") != alert_hash:
-        return False
-    sent_at_raw = state.get("sent_at")
+def _alert_state_item_is_recent(item: dict[str, Any], now: datetime, hours: int) -> bool:
+    sent_at_raw = item.get("sent_at")
     if not sent_at_raw:
         return False
     try:
         sent_at = datetime.fromisoformat(sent_at_raw)
     except ValueError:
         return False
-    return get_now_madrid() - sent_at <= timedelta(hours=6)
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=now.tzinfo)
+    return now - sent_at <= timedelta(hours=hours)
+
+
+def _is_duplicate_alert(alert_data: dict[str, Any] | str) -> bool:
+    if isinstance(alert_data, str):
+        alert_hash = alert_data
+        event_key = ""
+    else:
+        alert_hash = alert_data.get("hash", "")
+        event_key = alert_data.get("event_key", "")
+
+    if not alert_hash and not event_key:
+        return False
+
+    state = _load_alert_state()
+    now = get_now_madrid()
+    for item in state.get("recent_alerts", []):
+        if not _alert_state_item_is_recent(item, now, hours=8):
+            continue
+        if alert_hash and item.get("hash") == alert_hash:
+            return True
+        if event_key and item.get("event_key") == event_key:
+            return True
+    return False
 
 
 def send_telegram_message(text: str) -> bool:
@@ -2701,11 +2888,11 @@ def main() -> int:
         if not alert_data["triggered"]:
             print("Sin alerta importante en esta pasada.")
             return 0
-        if _is_duplicate_alert(alert_data["hash"]):
+        if _is_duplicate_alert(alert_data):
             print("Alerta duplicada reciente. No se reenvía.")
             return 0
         send_telegram_message(build_catastrophe_message(alert_data))
-        _save_alert_state(alert_data["hash"], get_now_madrid())
+        _save_alert_state(alert_data, get_now_madrid())
         return 0
 
     if effective_mode not in {"daily_open", "daily_close"}:

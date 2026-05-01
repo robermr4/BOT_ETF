@@ -156,7 +156,8 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Si una fuente falla, el bot intenta seguir con las demás.
 - Si una noticia está detrás de un muro de pago y no se puede extraer bien, el bot intenta buscar cobertura pública alternativa del mismo tema.
 - El análisis de “ricos/medios/pequeños” es una heurística, no un dato exacto por tipo de inversor.
-- La deduplicación de alertas graves es básica. En local guarda un pequeño estado en `.runtime/last_alert.json`, pero en GitHub Actions puede repetirse alguna alerta porque el runner es efímero.
+- La deduplicación de alertas graves guarda un pequeño historial en `.runtime/last_alert.json`. En GitHub Actions el workflow intenta restaurar y guardar ese estado con caché para evitar repetir la misma alerta cada 15 minutos.
+- La deduplicación de noticias combina título, fuente, temas, empresas y palabras de evento para reducir titulares repetidos contados por varias fuentes.
 
 ## Festivos de mercado
 

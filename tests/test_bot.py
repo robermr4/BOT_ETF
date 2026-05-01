@@ -151,6 +151,49 @@ def test_deduplicate_news_similar_titles():
     assert any("Nvidia rises" in title for title in titles)
 
 
+def test_deduplicate_news_same_event_different_wording():
+    news = [
+        {
+            "title": "Global market crash after banking crisis fears",
+            "summary": "Selloff spreads across Wall Street",
+            "source": "Reuters",
+        },
+        {
+            "title": "Banking crisis fears spark global market selloff",
+            "summary": "Wall Street drops as crash worries return",
+            "source": "CNBC",
+        },
+        {
+            "title": "Nvidia rises after strong earnings beat",
+            "summary": "Chip stocks gain after upbeat guidance",
+            "source": "Bloomberg",
+        },
+    ]
+    deduped = bot.deduplicate_news(news)
+    assert len(deduped) == 2
+    assert any("Nvidia" in item["title"] for item in deduped)
+
+
+def test_alert_hash_stable_for_same_price_event():
+    first = bot.detect_catastrophe({"symbol": "SPPW.DE", "pct_change": -3.1, "price": 38.1}, [])
+    second = bot.detect_catastrophe({"symbol": "SPPW.DE", "pct_change": -3.4, "price": 37.9}, [])
+    assert first["triggered"] is True
+    assert first["event_key"] == second["event_key"]
+    assert first["hash"] == second["hash"]
+
+
+def test_alert_event_key_groups_similar_crisis_news():
+    first = bot.detect_catastrophe(
+        {"symbol": "SPPW.DE", "pct_change": -0.2, "price": 39.8},
+        [{"title": "Global market crash after banking crisis fears", "summary": "Selloff spreads"}],
+    )
+    second = bot.detect_catastrophe(
+        {"symbol": "SPPW.DE", "pct_change": -0.2, "price": 39.8},
+        [{"title": "Banking crisis fears spark global market selloff", "summary": "Crash worries return"}],
+    )
+    assert first["event_key"] == second["event_key"]
+
+
 def test_rank_news_prioritizes_best_source_and_rule_based_summary():
     news = [
         {
