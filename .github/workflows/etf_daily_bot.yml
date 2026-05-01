@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf-cache
-          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-flan-t5-base-opus-en-es-v2
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-distilbart-flan-t5-base-opus-en-es-v3
 
       - name: Install dependencies
         run: |
@@ -53,6 +53,7 @@ jobs:
           RUN_MODE: ${{ github.event.inputs.mode || 'auto' }}
           AI_SUMMARIES_ENABLED: "1"
           AI_MODEL_NAME: google/flan-t5-base
+          AI_NEWS_SUMMARY_MODEL: sshleifer/distilbart-cnn-12-6
           AI_TRANSLATION_MODEL: Helsinki-NLP/opus-mt-en-es
           HF_HOME: ./.hf-cache
           GITHUB_EVENT_NAME: ${{ github.event_name }}

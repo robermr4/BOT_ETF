@@ -6,3 +6,4 @@ trafilatura
 transformers
 torch
 sentencepiece
+sacremoses

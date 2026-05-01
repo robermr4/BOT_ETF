@@ -291,6 +291,60 @@ def test_build_spanish_news_summary_falls_back_without_ai(monkeypatch: pytest.Mo
     assert "fed" in summary.lower() or "inflación" in summary.lower() or "tipos" in summary.lower()
 
 
+def test_build_spanish_news_summary_uses_dedicated_news_model(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        bot,
+        "load_config",
+        lambda: {
+            "ai_summaries_enabled": True,
+            "ai_summary_max_chars": 360,
+            "ai_article_max_chars": 2600,
+            "ai_news_summary_model_name": "fake-news-model",
+            "ai_translation_model_name": "fake-translator",
+        },
+    )
+    monkeypatch.setattr(
+        bot,
+        "fetch_article_text",
+        lambda link, fallback_summary=None: (
+            "Nvidia shares rose after the company reported stronger earnings than expected. "
+            "Management said demand for AI chips remained high and cloud customers kept ordering more capacity. "
+            "Analysts said the update supported confidence in the wider technology sector and helped Wall Street sentiment. "
+            "The move matters because Nvidia is a large company in global equity indexes."
+        ),
+    )
+    monkeypatch.setattr(bot, "_find_alternative_public_coverage", lambda title, original_link=None: [])
+
+    def fake_news_summarizer(text: str, **kwargs):
+        _ = kwargs
+        assert "Nvidia shares rose" in text
+        return [{"generated_text": "Nvidia rose after stronger earnings and resilient AI chip demand. The update helped confidence in large technology stocks and wider global equity sentiment."}]
+
+    def fake_translator(text: str, **kwargs):
+        _ = kwargs
+        assert "rose after stronger earnings" in text
+        nvidia_placeholder = next(
+            token
+            for token in text.split()
+            if token.startswith("ZXTERM") and token.endswith("Q")
+        )
+        return [{"generated_text": f"{nvidia_placeholder} subio tras unos resultados mejores y una demanda solida de chips de IA. La noticia apoyo la confianza en las grandes tecnologicas y en el tono de la bolsa global."}]
+
+    monkeypatch.setattr(bot, "_get_ai_news_summarizer", lambda config: fake_news_summarizer)
+    monkeypatch.setattr(bot, "_get_ai_translator", lambda config: fake_translator)
+    monkeypatch.setattr(bot, "_get_ai_summarizer", lambda config: None)
+
+    summary = bot.build_spanish_news_summary(
+        "Nvidia rises after earnings beat as AI demand stays strong",
+        "Wall Street cheers stronger results from the chip giant",
+        "https://example.com/nvidia",
+        "Reuters",
+    )
+    assert "Nvidia" in summary
+    assert "demanda" in summary.lower()
+    assert "Habla de" not in summary
+
+
 def test_build_prudent_advice_uses_free_ai(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         bot,

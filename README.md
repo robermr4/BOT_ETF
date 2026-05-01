@@ -60,6 +60,7 @@ Variables normales que puedes cambiar en el workflow o en `.env`:
 - `SECTION_NEWS_LIMIT`
 - `AI_SUMMARIES_ENABLED`
 - `AI_MODEL_NAME`
+- `AI_NEWS_SUMMARY_MODEL`
 - `AI_TRANSLATION_MODEL`
 
 ## Instalación local
@@ -143,6 +144,7 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Noticias de ETF, MSCI World, grandes tecnológicas, macro y mercado.
 - Un bloque separado de medios, otro de foros/comunidad y otro de pulso social.
 - Sentimiento aproximado por noticia: positivo, negativo o neutro.
+- Resumen con modelo dedicado para noticias (`AI_NEWS_SUMMARY_MODEL`) y traducción posterior al español si la fuente está en inglés.
 - Señales aproximadas sobre:
   - dinero grande / institucional
   - dinero medio
@@ -155,6 +157,7 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Yahoo Finance gratuito puede fallar o no devolver precio temporalmente.
 - Si una fuente falla, el bot intenta seguir con las demás.
 - Si una noticia está detrás de un muro de pago y no se puede extraer bien, el bot intenta buscar cobertura pública alternativa del mismo tema.
+- El resumen usa modelos gratuitos de Hugging Face. La primera ejecución puede tardar más porque GitHub Actions tiene que descargar modelos.
 - El análisis de “ricos/medios/pequeños” es una heurística, no un dato exacto por tipo de inversor.
 - La deduplicación de alertas graves guarda un pequeño historial en `.runtime/last_alert.json`. En GitHub Actions el workflow intenta restaurar y guardar ese estado con caché para evitar repetir la misma alerta cada 15 minutos.
 - La deduplicación de noticias combina título, fuente, temas, empresas y palabras de evento para reducir titulares repetidos contados por varias fuentes.

@@ -483,6 +483,9 @@ ARTICLE_BOILERPLATE_MARKERS = (
 _AI_SUMMARIZER = None
 _AI_SUMMARIZER_MODEL = None
 _AI_SUMMARIZER_FAILED = False
+_AI_NEWS_SUMMARIZER = None
+_AI_NEWS_SUMMARIZER_MODEL = None
+_AI_NEWS_SUMMARIZER_FAILED = False
 _AI_TRANSLATOR = None
 _AI_TRANSLATOR_MODEL = None
 _AI_TRANSLATOR_FAILED = False
@@ -512,6 +515,7 @@ def load_config() -> dict[str, Any]:
         "section_news_limit": int(os.getenv("SECTION_NEWS_LIMIT", "5")),
         "ai_summaries_enabled": os.getenv("AI_SUMMARIES_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
         "ai_model_name": os.getenv("AI_MODEL_NAME", "google/flan-t5-base").strip(),
+        "ai_news_summary_model_name": os.getenv("AI_NEWS_SUMMARY_MODEL", "sshleifer/distilbart-cnn-12-6").strip(),
         "ai_translation_model_name": os.getenv("AI_TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-en-es").strip(),
         "ai_article_max_chars": int(os.getenv("AI_ARTICLE_MAX_CHARS", "2600")),
         "ai_summary_max_chars": int(os.getenv("AI_SUMMARY_MAX_CHARS", "360")),
@@ -1604,6 +1608,41 @@ def _get_ai_summarizer(config: dict[str, Any]):
         return None
 
 
+def _get_ai_news_summarizer(config: dict[str, Any]):
+    global _AI_NEWS_SUMMARIZER, _AI_NEWS_SUMMARIZER_FAILED, _AI_NEWS_SUMMARIZER_MODEL
+
+    if not config.get("ai_summaries_enabled", True):
+        return None
+    if _AI_NEWS_SUMMARIZER_FAILED:
+        return None
+    model_name = config.get("ai_news_summary_model_name") or config.get("ai_model_name")
+    if _AI_NEWS_SUMMARIZER is not None and _AI_NEWS_SUMMARIZER_MODEL == model_name:
+        return _AI_NEWS_SUMMARIZER
+
+    try:
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    except Exception as exc:  # noqa: BLE001
+        print(f"Transformers no estÃ¡ disponible para resumir noticias: {exc}")
+        _AI_NEWS_SUMMARIZER_FAILED = True
+        return None
+
+    try:
+        print(f"Cargando modelo de resumen de noticias: {model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        model.eval()
+        _AI_NEWS_SUMMARIZER = {
+            "tokenizer": tokenizer,
+            "model": model,
+        }
+        _AI_NEWS_SUMMARIZER_MODEL = model_name
+        return _AI_NEWS_SUMMARIZER
+    except Exception as exc:  # noqa: BLE001
+        print(f"No he podido cargar el modelo de resumen de noticias, uso respaldo: {exc}")
+        _AI_NEWS_SUMMARIZER_FAILED = True
+        return None
+
+
 def _get_ai_translator(config: dict[str, Any]):
     global _AI_TRANSLATOR, _AI_TRANSLATOR_FAILED, _AI_TRANSLATOR_MODEL
 
@@ -1802,6 +1841,58 @@ def _build_passage_translation_summary(
         translated_parts.append(_build_news_relevance_sentence(title, summary))
     combined = " ".join(_trim_text(part, 210) for part in translated_parts[:2])
     return _trim_text(combined, max_len)
+
+
+def _build_news_model_summary(
+    title: str,
+    summary: str | None,
+    passages: list[str],
+    news_summarizer: Any | None,
+    translator: Any | None,
+    max_len: int,
+) -> str:
+    if news_summarizer is None or not passages:
+        return ""
+
+    source_text = " ".join(_clean_news_text(passage) for passage in passages[:4])
+    source_text = _clean_news_text(f"{summary or ''}. {source_text}")
+    if len(source_text.split()) < 35:
+        return ""
+
+    try:
+        generated = _run_ai_summarizer(
+            source_text,
+            news_summarizer,
+            max_new_tokens=92,
+            do_sample=False,
+            temperature=1.0,
+            top_p=1.0,
+            repetition_penalty=1.05,
+            no_repeat_ngram_size=3,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"El modelo dedicado de resumen fallÃ³ para '{title[:70]}': {exc}")
+        return ""
+
+    english_summary = _sanitize_generated_news_summary(generated)
+    if _is_vague_generated_summary(english_summary, title, summary):
+        return ""
+
+    if _looks_like_spanish_text(english_summary):
+        spanish_summary = english_summary
+    elif translator is not None:
+        try:
+            spanish_summary = _translate_passage_with_ai(english_summary, translator)
+        except Exception as exc:  # noqa: BLE001
+            print(f"No he podido traducir el resumen dedicado: {exc}")
+            spanish_summary = _translate_finance_text(english_summary, max_len=max_len)
+    else:
+        spanish_summary = _translate_finance_text(english_summary, max_len=max_len)
+
+    spanish_summary = _sanitize_generated_news_summary(spanish_summary)
+    if _is_vague_generated_summary(spanish_summary, title, summary):
+        return ""
+    return _trim_text(spanish_summary, max_len)
 
 
 def _money_flow_signal_for_ai(money_flow_analysis: dict[str, str] | None) -> str:
@@ -2291,6 +2382,20 @@ def build_spanish_news_summary(
         return final_text
 
     translator = _get_ai_translator(config)
+    news_summarizer = _get_ai_news_summarizer(config)
+    model_summary = _build_news_model_summary(
+        title,
+        summary,
+        passages,
+        news_summarizer,
+        translator,
+        config.get("ai_summary_max_chars", 360),
+    )
+    if model_summary:
+        print(f"Resumen IA dedicado para: {title[:70]}")
+        _NEWS_SUMMARY_CACHE[cache_key] = model_summary
+        return model_summary
+
     passage_summary = _build_passage_translation_summary(
         title,
         summary,
