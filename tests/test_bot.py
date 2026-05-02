@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import json
 import sys
 
 import pytest
@@ -425,3 +426,49 @@ def test_translate_passage_with_ai_preserves_company_names():
     assert "Alphabet" in translated
     assert "Amazona" not in translated
     assert "Alfabeto" not in translated
+
+
+def test_normalize_telegram_command_accepts_bot_suffix():
+    assert bot._normalize_telegram_command("/prueba@ETF_Noticias_bot ahora") == "/prueba"
+    assert bot._normalize_telegram_command("/pruebalertas") == "/pruebalertas"
+
+
+def test_process_telegram_commands_replies_and_saves_offset(monkeypatch: pytest.MonkeyPatch):
+    runtime_dir = Path(__file__).resolve().parents[1] / ".runtime-test"
+    runtime_dir.mkdir(exist_ok=True)
+    state_path = runtime_dir / "telegram_updates.json"
+    if state_path.exists():
+        state_path.unlink()
+
+    config = {
+        "telegram_bot_token": "fake-token",
+        "telegram_chat_id": "838888837",
+        "request_timeout": 8,
+        "runtime_dir": runtime_dir,
+    }
+    updates = [
+        {"update_id": 10, "message": {"chat": {"id": 838888837}, "text": "/prueba"}},
+        {"update_id": 11, "message": {"chat": {"id": 838888837}, "text": "/pruebalertas"}},
+        {"update_id": 12, "message": {"chat": {"id": 999}, "text": "/prueba"}},
+    ]
+    sent: list[tuple[str, int | str | None]] = []
+
+    monkeypatch.setattr(bot, "load_config", lambda: config)
+    monkeypatch.setattr(bot, "_fetch_telegram_updates", lambda offset=None: updates)
+    monkeypatch.setattr(bot, "build_latest_news_test_message", lambda: "NEWS TEST")
+    monkeypatch.setattr(bot, "build_alert_test_message", lambda: "ALERT TEST")
+    monkeypatch.setattr(bot, "send_telegram_message", lambda text, chat_id=None: sent.append((text, chat_id)) or True)
+
+    try:
+        assert bot.process_telegram_commands() == 0
+        assert sent == [("NEWS TEST", 838888837), ("ALERT TEST", 838888837)]
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["offset"] == 13
+    finally:
+        if state_path.exists():
+            state_path.unlink()
+        try:
+            runtime_dir.rmdir()
+        except OSError:
+            pass

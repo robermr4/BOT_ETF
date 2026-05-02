@@ -515,8 +515,10 @@ def load_config() -> dict[str, Any]:
         "section_news_limit": int(os.getenv("SECTION_NEWS_LIMIT", "5")),
         "ai_summaries_enabled": os.getenv("AI_SUMMARIES_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
         "ai_model_name": os.getenv("AI_MODEL_NAME", "google/flan-t5-base").strip(),
-        "ai_news_summary_model_name": os.getenv("AI_NEWS_SUMMARY_MODEL", "sshleifer/distilbart-cnn-12-6").strip(),
-        "ai_translation_model_name": os.getenv("AI_TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-en-es").strip(),
+        "ai_news_summary_model_name": os.getenv("AI_NEWS_SUMMARY_MODEL", "facebook/bart-large-cnn").strip(),
+        "ai_translation_model_name": os.getenv("AI_TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M").strip(),
+        "ai_translation_source_lang": os.getenv("AI_TRANSLATION_SOURCE_LANG", "eng_Latn").strip(),
+        "ai_translation_target_lang": os.getenv("AI_TRANSLATION_TARGET_LANG", "spa_Latn").strip(),
         "ai_article_max_chars": int(os.getenv("AI_ARTICLE_MAX_CHARS", "2600")),
         "ai_summary_max_chars": int(os.getenv("AI_SUMMARY_MAX_CHARS", "360")),
     }
@@ -562,7 +564,7 @@ def detect_run_mode() -> str:
     else:
         candidate = load_config()["run_mode"]
 
-    valid_modes = {"auto", "daily_open", "daily_close", "catastrophe_watch", "discover_chat"}
+    valid_modes = {"auto", "daily_open", "daily_close", "catastrophe_watch", "discover_chat", "telegram_commands"}
     if candidate not in valid_modes:
         print(f"RUN_MODE desconocido '{candidate}', uso 'auto'.")
         return "auto"
@@ -593,6 +595,9 @@ def should_send_now(run_mode: str | None = None) -> dict[str, Any]:
             "mode": mode,
             "reason": "ventana de vigilancia" if allowed else "fuera de la ventana de vigilancia",
         }
+
+    if mode == "telegram_commands":
+        return {"should_send": True, "mode": mode, "reason": "revisión de comandos de Telegram"}
 
     if _within_time_window(now, *DAILY_TARGETS["daily_open"]):
         return {"should_send": True, "mode": "daily_open", "reason": "franja de apertura"}
@@ -1668,6 +1673,9 @@ def _get_ai_translator(config: dict[str, Any]):
         _AI_TRANSLATOR = {
             "tokenizer": tokenizer,
             "model": model,
+            "model_name": config.get("ai_translation_model_name"),
+            "source_lang": config.get("ai_translation_source_lang", "eng_Latn"),
+            "target_lang": config.get("ai_translation_target_lang", "spa_Latn"),
         }
         _AI_TRANSLATOR_MODEL = config.get("ai_translation_model_name")
         return _AI_TRANSLATOR
@@ -1764,6 +1772,58 @@ def _run_ai_summarizer(
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 
+def _run_ai_translator(text: str, translator: Any, max_new_tokens: int) -> str:
+    if callable(translator):
+        return _run_ai_summarizer(
+            text,
+            translator,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=1.0,
+            top_p=1.0,
+            repetition_penalty=1.0,
+            no_repeat_ngram_size=0,
+        )
+
+    try:
+        import torch
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Torch no está disponible para traducir: {exc}") from exc
+
+    tokenizer = translator["tokenizer"]
+    model = translator["model"]
+    model_name = str(translator.get("model_name", "")).lower()
+
+    if "nllb" in model_name:
+        source_lang = translator.get("source_lang") or "eng_Latn"
+        target_lang = translator.get("target_lang") or "spa_Latn"
+        if hasattr(tokenizer, "src_lang"):
+            tokenizer.src_lang = source_lang
+        forced_bos_token_id = tokenizer.convert_tokens_to_ids(target_lang)
+        encoded = tokenizer(text, return_tensors="pt", truncation=True, max_length=768)
+        with torch.no_grad():
+            output = model.generate(
+                **encoded,
+                forced_bos_token_id=forced_bos_token_id,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                repetition_penalty=1.02,
+                no_repeat_ngram_size=3,
+            )
+        return tokenizer.decode(output[0], skip_special_tokens=True)
+
+    return _run_ai_summarizer(
+        text,
+        translator,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        temperature=1.0,
+        top_p=1.0,
+        repetition_penalty=1.0,
+        no_repeat_ngram_size=0,
+    )
+
+
 def _looks_like_spanish_text(text: str) -> bool:
     lowered = _clean_news_text(text).lower()
     if not lowered:
@@ -1786,15 +1846,10 @@ def _looks_like_spanish_text(text: str) -> bool:
 
 def _translate_passage_with_ai(passage: str, translator: Any) -> str:
     protected_passage, mapping = _protect_finance_terms(passage)
-    translated = _run_ai_summarizer(
+    translated = _run_ai_translator(
         protected_passage,
         translator,
         max_new_tokens=max(96, min(220, len(passage.split()) * 3)),
-        do_sample=False,
-        temperature=1.0,
-        top_p=1.0,
-        repetition_penalty=1.0,
-        no_repeat_ngram_size=0,
     )
     translated = _restore_finance_terms(translated, mapping)
     return _sanitize_generated_news_summary(translated)
@@ -1855,9 +1910,11 @@ def _build_news_model_summary(
         return ""
 
     source_text = " ".join(_clean_news_text(passage) for passage in passages[:4])
-    source_text = _clean_news_text(f"{summary or ''}. {source_text}")
+    source_text = _clean_news_text(f"{title}. {summary or ''}. {source_text}")
     if len(source_text.split()) < 35:
         return ""
+    if _looks_like_spanish_text(source_text):
+        return _trim_text(_sanitize_generated_news_summary(" ".join(passages[:2])), max_len)
 
     try:
         generated = _run_ai_summarizer(
@@ -2865,7 +2922,7 @@ def _is_duplicate_alert(alert_data: dict[str, Any] | str) -> bool:
     return False
 
 
-def send_telegram_message(text: str) -> bool:
+def send_telegram_message(text: str, chat_id: str | int | None = None) -> bool:
     config = load_config()
     if config["dry_run"]:
         print("DRY_RUN activo. Mensaje preparado:")
@@ -2873,13 +2930,13 @@ def send_telegram_message(text: str) -> bool:
         return True
 
     token = config["telegram_bot_token"]
-    chat_id = config["telegram_chat_id"]
-    if not token or not chat_id:
+    target_chat_id = str(chat_id or config["telegram_chat_id"]).strip()
+    if not token or not target_chat_id:
         raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": chat_id,
+        "chat_id": target_chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
@@ -2974,10 +3031,194 @@ def discover_telegram_chat_ids() -> int:
     return 0
 
 
+def _telegram_command_state_path() -> Path:
+    return load_config()["runtime_dir"] / "telegram_updates.json"
+
+
+def _load_telegram_command_state() -> dict[str, Any]:
+    path = _telegram_command_state_path()
+    if not path.exists():
+        return {"offset": None}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"offset": None}
+    if "offset" not in state:
+        state["offset"] = None
+    return state
+
+
+def _save_telegram_command_state(offset: int | None) -> None:
+    payload = {
+        "offset": offset,
+        "saved_at": get_now_madrid().isoformat(),
+    }
+    _telegram_command_state_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalize_telegram_command(text: str) -> str:
+    if not text:
+        return ""
+    first_token = text.strip().split()[0].lower()
+    return first_token.split("@", 1)[0]
+
+
+def _telegram_chat_is_allowed(chat_id: Any, config: dict[str, Any]) -> bool:
+    expected_chat_id = str(config.get("telegram_chat_id", "")).strip()
+    return bool(expected_chat_id) and str(chat_id).strip() == expected_chat_id
+
+
+def _fetch_telegram_updates(offset: int | None = None) -> list[dict[str, Any]]:
+    config = load_config()
+    token = config["telegram_bot_token"]
+    if not token:
+        raise RuntimeError("Falta TELEGRAM_BOT_TOKEN para leer comandos de Telegram.")
+
+    params: dict[str, Any] = {
+        "timeout": 0,
+        "allowed_updates": json.dumps(["message"]),
+    }
+    if offset is not None:
+        params["offset"] = offset
+
+    response = requests.get(
+        f"https://api.telegram.org/bot{token}/getUpdates",
+        params=params,
+        timeout=config["request_timeout"],
+        headers={"User-Agent": USER_AGENT},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"Telegram devolvió error leyendo comandos: {payload}")
+    return payload.get("result", [])
+
+
+def _prepare_single_news_for_preview(item: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(item)
+    prepared["translated_summary"] = build_spanish_news_summary(
+        prepared.get("title", ""),
+        prepared.get("summary"),
+        prepared.get("link"),
+        prepared.get("source"),
+    )
+    return prepared
+
+
+def build_latest_news_test_message() -> str:
+    news_items = fetch_news_sections().get("all", [])
+    selected = select_news_for_message(news_items, 1)
+    if not selected:
+        return (
+            "<b>🧪 Prueba de noticia</b>\n\n"
+            "Ahora mismo no he encontrado una noticia suficientemente relevante en las fuentes gratuitas. "
+            "El bot está vivo, pero no hay nada decente que resumir en esta pasada."
+        )
+
+    item = _prepare_single_news_for_preview(selected[0])
+    return "\n".join(
+        [
+            "<b>🧪 Prueba de noticia</b>",
+            "",
+            "Así se vería una noticia resumida ahora mismo:",
+            "",
+            _render_news_item(1, item, summary_max_len=360),
+            "",
+            "⚠️ <b>Aviso:</b> Es una prueba manual, no asesoramiento financiero personalizado.",
+        ]
+    )
+
+
+def build_alert_test_message() -> str:
+    config = load_config()
+    main_price = get_yahoo_price(config["yahoo_symbol"])
+    news_items = fetch_news()
+    alert_data = detect_catastrophe({"main": main_price, "watchlist": _build_watchlist_snapshot()}, news_items)
+
+    if alert_data.get("triggered"):
+        return "\n\n".join(
+            [
+                "<b>🧪 Prueba de alertas</b>\nHe detectado una alerta real con los datos actuales.",
+                build_catastrophe_message(alert_data),
+            ]
+        )
+
+    selected = select_news_for_message(news_items, 1)
+    if not selected:
+        return (
+            "<b>🧪 Prueba de alertas</b>\n\n"
+            "No hay alerta real activa y tampoco he encontrado una noticia reciente clara para montar un ejemplo."
+        )
+
+    item = _prepare_single_news_for_preview(selected[0])
+    mock_alert = {
+        "triggered": True,
+        "headline": item.get("title", ""),
+        "alerts": [f"Ejemplo basado en una noticia relevante: {item.get('title', 'sin titular')}"],
+        "top_news": item,
+        "main_price": main_price,
+        "watchlist": {},
+        "event_key": "manual-test",
+        "hash": "manual-test",
+    }
+    return "\n\n".join(
+        [
+            "<b>🧪 Prueba de alertas</b>\nNo hay alerta real activa. Esto es sólo una simulación con la noticia más relevante que he visto.",
+            build_catastrophe_message(mock_alert),
+        ]
+    )
+
+
+def process_telegram_commands() -> int:
+    config = load_config()
+    if not config["telegram_bot_token"] or not config["telegram_chat_id"]:
+        raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID para procesar comandos.")
+
+    state = _load_telegram_command_state()
+    updates = _fetch_telegram_updates(state.get("offset"))
+    if not updates:
+        print("Sin comandos nuevos de Telegram.")
+        return 0
+
+    max_update_id: int | None = None
+    pending_commands: list[tuple[str, int | str]] = []
+    for update in updates:
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            max_update_id = update_id if max_update_id is None else max(max_update_id, update_id)
+
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if not _telegram_chat_is_allowed(chat_id, config):
+            continue
+
+        command = _normalize_telegram_command(str(message.get("text", "")))
+        if command in {"/prueba", "/pruebalertas"}:
+            pending_commands.append((command, chat_id))
+
+    responded = 0
+    for command, chat_id in pending_commands[-5:]:
+        if command == "/prueba":
+            send_telegram_message(build_latest_news_test_message(), chat_id=chat_id)
+            responded += 1
+        elif command == "/pruebalertas":
+            send_telegram_message(build_alert_test_message(), chat_id=chat_id)
+            responded += 1
+
+    if max_update_id is not None:
+        _save_telegram_command_state(max_update_id + 1)
+
+    print(f"Comandos de Telegram procesados: {responded}.")
+    return 0
+
+
 def main() -> int:
     run_mode = detect_run_mode()
     if run_mode == "discover_chat":
         return discover_telegram_chat_ids()
+    if run_mode == "telegram_commands":
+        return process_telegram_commands()
     decision = should_send_now(run_mode)
     print(f"RUN_MODE={run_mode} | should_send={decision['should_send']} | reason={decision['reason']}")
 
@@ -2986,6 +3227,11 @@ def main() -> int:
 
     effective_mode = decision["mode"]
     if effective_mode == "catastrophe_watch":
+        try:
+            process_telegram_commands()
+        except Exception as exc:  # noqa: BLE001
+            print(f"No he podido procesar comandos de Telegram en esta pasada: {exc}")
+
         config = load_config()
         main_price = get_yahoo_price(config["yahoo_symbol"])
         news_items = fetch_news()

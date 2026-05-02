@@ -62,6 +62,8 @@ Variables normales que puedes cambiar en el workflow o en `.env`:
 - `AI_MODEL_NAME`
 - `AI_NEWS_SUMMARY_MODEL`
 - `AI_TRANSLATION_MODEL`
+- `AI_TRANSLATION_SOURCE_LANG`
+- `AI_TRANSLATION_TARGET_LANG`
 
 ## Instalación local
 
@@ -88,9 +90,11 @@ python .\bot.py
 - `daily_open`
 - `daily_close`
 - `catastrophe_watch`
+- `telegram_commands`
 - `auto`
 
 `auto` se usa en el workflow diario y decide si toca apertura o cierre según la hora real en `Europe/Madrid`.
+`telegram_commands` lee los últimos mensajes enviados al bot y responde a comandos de prueba.
 
 ## Lógica de horarios con GitHub Actions
 
@@ -116,6 +120,15 @@ Y luego Python filtra para dejar solo la ventana aproximada de `07:00` a `22:00`
 
 Ambos tienen `workflow_dispatch` para probarlos manualmente.
 
+## Comandos desde Telegram
+
+Puedes escribirle al bot:
+
+- `/prueba`: manda un ejemplo con la noticia más relevante detectada, resumen en español, fuente, enlace y tono positivo/negativo/neutro.
+- `/pruebalertas`: manda una prueba del formato de alerta. Si hay una alerta real activa, la usa; si no, monta una simulación claramente marcada con la noticia más relevante.
+
+Como no hay servidor 24/7, el bot no puede contestar instantáneamente como un chat normal. Los comandos se revisan cuando corre el workflow de vigilancia, aproximadamente cada 15 minutos durante la ventana de mercado ampliada. Si quieres forzarlo al momento, entra en `Actions`, abre `ETF Daily Bot`, pulsa `Run workflow` y elige `telegram_commands`.
+
 ## Cómo hacer que funcione con el ordenador apagado
 
 Si lo ejecutas solo en tu PC, tu ordenador tiene que estar encendido.
@@ -135,7 +148,7 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 2. Entra en la pestaña `Actions`.
 3. Abre el workflow que quieras.
 4. Pulsa `Run workflow`.
-5. En el diario puedes elegir `auto`, `daily_open` o `daily_close`.
+5. En el diario puedes elegir `auto`, `daily_open`, `daily_close` o `telegram_commands`.
 
 ## Qué analiza el mensaje
 
@@ -144,7 +157,7 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Noticias de ETF, MSCI World, grandes tecnológicas, macro y mercado.
 - Un bloque separado de medios, otro de foros/comunidad y otro de pulso social.
 - Sentimiento aproximado por noticia: positivo, negativo o neutro.
-- Resumen con modelo dedicado para noticias (`AI_NEWS_SUMMARY_MODEL`) y traducción posterior al español si la fuente está en inglés.
+- Resumen con modelo dedicado para noticias (`AI_NEWS_SUMMARY_MODEL`) y traducción posterior al español si la fuente está en inglés. Por defecto usa `facebook/bart-large-cnn` para resumir y `facebook/nllb-200-distilled-600M` para traducir mejor que el traductor anterior.
 - Señales aproximadas sobre:
   - dinero grande / institucional
   - dinero medio
@@ -158,6 +171,7 @@ En ese modo, quien ejecuta el bot es GitHub en la nube, no tu ordenador.
 - Si una fuente falla, el bot intenta seguir con las demás.
 - Si una noticia está detrás de un muro de pago y no se puede extraer bien, el bot intenta buscar cobertura pública alternativa del mismo tema.
 - El resumen usa modelos gratuitos de Hugging Face. La primera ejecución puede tardar más porque GitHub Actions tiene que descargar modelos.
+- Los modelos nuevos son mejores, pero también más pesados. GitHub Actions los cachea después de la primera descarga.
 - El análisis de “ricos/medios/pequeños” es una heurística, no un dato exacto por tipo de inversor.
 - La deduplicación de alertas graves guarda un pequeño historial en `.runtime/last_alert.json`. En GitHub Actions el workflow intenta restaurar y guardar ese estado con caché para evitar repetir la misma alerta cada 15 minutos.
 - La deduplicación de noticias combina título, fuente, temas, empresas y palabras de evento para reducir titulares repetidos contados por varias fuentes.

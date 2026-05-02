@@ -18,6 +18,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-bart-large-cnn-nllb-flan-v4
+
       - name: Restore alert state
         uses: actions/cache/restore@v4
         with:
@@ -40,7 +46,13 @@ jobs:
           YAHOO_SYMBOL: SPPW.DE
           TIMEZONE: Europe/Madrid
           RUN_MODE: catastrophe_watch
-          AI_SUMMARIES_ENABLED: "0"
+          AI_SUMMARIES_ENABLED: "1"
+          AI_MODEL_NAME: google/flan-t5-base
+          AI_NEWS_SUMMARY_MODEL: facebook/bart-large-cnn
+          AI_TRANSLATION_MODEL: facebook/nllb-200-distilled-600M
+          AI_TRANSLATION_SOURCE_LANG: eng_Latn
+          AI_TRANSLATION_TARGET_LANG: spa_Latn
+          HF_HOME: ./.hf-cache
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
           PYTHONUNBUFFERED: "1"
